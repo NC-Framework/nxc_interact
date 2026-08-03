@@ -147,7 +147,9 @@ describe('The interaction gate', () => {
     `);
     // Refusing after the animation is a worse experience than refusing before,
     // for identical safety.
-    assert.equal(r.refusal, 'capability');
+    // A structured code rather than a bare word, consistent with every other
+    // refusal in the framework.
+    assert.equal(r.refusal, 'NXC_LIB_FORBIDDEN');
     assert.equal(r.began, false);
   });
 
@@ -160,7 +162,7 @@ describe('The interaction gate', () => {
     // Refused rather than completed with the consumption silently dropped. A
     // crafting recipe that consumes nothing and produces nothing looks like it
     // worked.
-    assert.equal(r.refusal, 'unavailable');
+    assert.equal(r.refusal, 'NXC_INTERACT_UNAVAILABLE');
     assert.equal(r.dispatched, 0);
   });
 
@@ -239,5 +241,109 @@ describe('The interaction gate', () => {
     `);
     assert.equal(r.dispatched, 0);
     assert.equal(r.refusal, 'NXC_INTERACT_NOT_STARTED');
+  });
+});
+
+describe('Composing with nxc_target', () => {
+  let lua;
+
+  beforeEach(async () => {
+    lua = await createResourceEngine('nxc_interact', {
+      blocks: ['shared_scripts', 'server_scripts'],
+    });
+    await lua.doString(`
+      __toClient = {} __dispatched = {} __capabilities = {} __now = 1000
+      Nxc.Time.setClock(function() return __now end)
+      function TriggerClientEvent(name, target, ...)
+        __toClient[#__toClient + 1] = { name = name, target = target, args = { ... } }
+      end
+      function TriggerEvent(name, context)
+        __dispatched[#__dispatched + 1] = { name = name, context = context }
+      end
+      exports = setmetatable({}, { __index = function() return {
+        hasCapability = function(_, cap) return __capabilities[cap] == true end,
+        accountFor = function() return 'acc_test' end,
+        characterFor = function() return nil end } end })
+    `);
+  });
+
+  afterEach(() => lua.global.close());
+
+  test('a resource can start a workflow for a player', async () => {
+    // THE LINK BETWEEN THE TWO RESOURCES. A nxc_target option handler runs on
+    // the server with a validated context and no client to ask — without this
+    // export it could not make the player stand there and do the thing it had
+    // just decided they were allowed to do.
+    const r = await lua.doString(`
+      __exports['register']({ id='pick', durationMs=8000, onComplete='my_doors:server:picked' })
+
+      -- What a target handler does with the context it was given.
+      local started = __exports['begin'](5, 'nxc_interact:pick')
+
+      local begun
+      for _, m in ipairs(__toClient) do
+        if m.name == 'nxc_interact:client:begin' then begun = m end
+      end
+      return { ok = started.ok, key = started.value.key,
+               sentTo = begun and begun.target, duration = begun and begun.args[1].durationMs }
+    `);
+    assert.equal(r.ok, true);
+    assert.equal(r.key, 'nxc_interact:pick');
+    assert.equal(r.sentTo, 5);
+    assert.equal(r.duration, 8000);
+  });
+
+  test('a resource starting one does not bypass the capability check', async () => {
+    const r = await lua.doString(`
+      __exports['register']({ id='pick', durationMs=8000, capability='doors.pick' })
+      __capabilities = {}
+      local started = __exports['begin'](5, 'nxc_interact:pick')
+      return { ok = started.ok, code = started.error.code }
+    `);
+    // A resource asking on a player's behalf is not the same as the player being
+    // entitled. The two diverge the moment one resource trusts another's
+    // reasoning, so the session is asked either way.
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'NXC_LIB_FORBIDDEN');
+  });
+
+  test('a resource cannot start an unknown workflow', async () => {
+    const r = await lua.doString(`
+      local started = __exports['begin'](5, 'nxc_banking:payout')
+      return { ok = started.ok, code = started.error.code }
+    `);
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'NXC_INTERACT_UNKNOWN_WORKFLOW');
+  });
+
+  test('a resource cannot start a second workflow for a busy player', async () => {
+    const r = await lua.doString(`
+      __exports['register']({ id='pick', durationMs=8000 })
+      __exports['begin'](5, 'nxc_interact:pick')
+      local second = __exports['begin'](5, 'nxc_interact:pick')
+      return second.error.code
+    `);
+    assert.equal(r, 'NXC_INTERACT_ALREADY_BUSY');
+  });
+
+  test('both entry points share one implementation', async () => {
+    // The client asking and a resource starting must be the same code, or the
+    // checks drift apart and one path quietly becomes the weak one.
+    const r = await lua.doString(`
+      __exports['register']({ id='pick', durationMs=8000, capability='doors.pick' })
+      __capabilities = {}
+
+      source = 5
+      __events['nxc_interact:server:start']({ key = 'nxc_interact:pick' })
+      local viaClient
+      for _, m in ipairs(__toClient) do
+        if m.name == 'nxc_interact:client:refused' then viaClient = m.args[2] end
+      end
+
+      local viaResource = __exports['begin'](5, 'nxc_interact:pick').error.code
+      return { viaClient = viaClient, viaResource = viaResource }
+    `);
+    assert.equal(r.viaClient, r.viaResource);
+    assert.equal(r.viaClient, 'NXC_LIB_FORBIDDEN');
   });
 });

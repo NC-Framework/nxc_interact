@@ -73,67 +73,61 @@ function Service.register(workflow, owner)
     return Nxc.Result.ok({ key = stored.key, advisory = valid.value.advisory })
 end
 
---- A client asking to begin.
-RegisterNetEvent('nxc_interact:server:start', function(request)
-    local source = source
-
-    if type(request) ~= 'table' or type(request.key) ~= 'string' then
-        return
-    end
-
-    local workflow = registry[request.key]
+--- Begin a workflow for a player.
+---
+--- **THE ONLY PATH IN, AND BOTH CALLERS USE IT.** A client may ask directly, and
+--- a resource may start one on a player's behalf — which is what a nxc_target
+--- option handler does, since that is where the validated context lands and it
+--- runs on the server with no client to ask.
+---
+--- Without this export the two resources do not compose: the handler that has
+--- just been told a player may pick a lock has no way to make them stand there
+--- and do it.
+---
+---@param source any
+---@param workflowKey string
+---@return NxcResult
+function Service.begin(source, workflowKey)
+    local workflow = registry[workflowKey]
     if not workflow then
-        Nxc.Logger.warn('interact.unknown_workflow', {
-            connection = tostring(source), workflow = tostring(request.key),
-        })
-        return
+        return Nxc.Result.err(Nxc.Errors.new('NXC_INTERACT_UNKNOWN_WORKFLOW',
+            'That is not a workflow.',
+            { resource = NxcInteract.RESOURCE, details = { workflow = tostring(workflowKey) } }))
     end
 
-    -- Capability, from the session rather than the request.
+    -- Capability, from the session rather than from anything the caller passed.
+    -- Checked even when a resource starts the workflow: a resource asking on a
+    -- player's behalf is not the same as the player being entitled, and the two
+    -- diverge the moment one resource trusts another's reasoning.
     if workflow.capability then
         local ok, held = pcall(function()
             return exports.nxc_core:hasCapability(source, workflow.capability)
         end)
         if not ok or held ~= true then
-            Nxc.Logger.warn('interact.start_refused', {
-                connection = tostring(source), workflow = workflow.key,
-                reason = 'capability',
-            })
-            TriggerClientEvent('nxc_interact:client:refused', source, workflow.key, 'capability')
-            return
+            return Nxc.Result.err(Nxc.Errors.forbidden(workflow.capability))
         end
     end
 
-    -- Anything this resource cannot honour is refused BEFORE the player waits
-    -- five seconds for it. Refusing after the animation is a worse experience
-    -- than refusing before, for identical safety.
+    -- Anything that cannot be honoured is refused BEFORE the player waits for
+    -- it. Refusing after the animation is a worse experience for identical
+    -- safety.
     if workflow.consumes and not providers.items then
-        Nxc.Logger.warn('interact.start_refused', {
-            connection = tostring(source), workflow = workflow.key,
-            reason = 'no inventory provider is registered',
-            detail = 'refusing rather than completing with the consumption dropped',
-        })
-        TriggerClientEvent('nxc_interact:client:refused', source, workflow.key, 'unavailable')
-        return
+        return Nxc.Result.err(Nxc.Errors.new('NXC_INTERACT_UNAVAILABLE',
+            'That is not available right now.',
+            { resource = NxcInteract.RESOURCE,
+              details = { reason = 'no inventory provider is registered' } }))
     end
     if workflow.rewards and not providers.rewards then
-        Nxc.Logger.warn('interact.start_refused', {
-            connection = tostring(source), workflow = workflow.key,
-            reason = 'no reward provider is registered',
-        })
-        TriggerClientEvent('nxc_interact:client:refused', source, workflow.key, 'unavailable')
-        return
+        return Nxc.Result.err(Nxc.Errors.new('NXC_INTERACT_UNAVAILABLE',
+            'That is not available right now.',
+            { resource = NxcInteract.RESOURCE,
+              details = { reason = 'no reward provider is registered' } }))
     end
 
     local correlationId = Nxc.Correlation.new()
     local started = NxcInteract.Sessions.start(
         state, source, workflow, Nxc.Time.nowMs(), correlationId)
-
-    if not started.ok then
-        TriggerClientEvent('nxc_interact:client:refused', source, workflow.key,
-            started.error.code, started.error.details)
-        return
-    end
+    if not started.ok then return started end
 
     TriggerClientEvent('nxc_interact:client:begin', source, {
         key = workflow.key,
@@ -141,6 +135,26 @@ RegisterNetEvent('nxc_interact:server:start', function(request)
         steps = Nxc.plain(workflow.steps or {}),
         correlationId = correlationId,
     })
+
+    return Nxc.Result.ok({ key = workflow.key, correlationId = correlationId })
+end
+
+--- A client asking to begin.
+RegisterNetEvent('nxc_interact:server:start', function(request)
+    local source = source
+
+    if type(request) ~= 'table' or type(request.key) ~= 'string' then return end
+
+    local result = Service.begin(source, request.key)
+    if not result.ok then
+        Nxc.Logger.warn('interact.start_refused', {
+            connection = tostring(source), workflow = tostring(request.key),
+            reason = result.error.code,
+            details = result.error.details,
+        })
+        TriggerClientEvent('nxc_interact:client:refused', source,
+            request.key, result.error.code, Nxc.plain(result.error.details))
+    end
 end)
 
 --- A client reporting that it finished.
@@ -274,6 +288,15 @@ end)
 exports('register', function(workflow)
     local owner = GetInvokingResource() or NxcInteract.RESOURCE
     return Nxc.plain(Service.register(workflow, owner))
+end)
+
+--- Start a workflow for a player, from a resource.
+---
+--- This is how nxc_target and nxc_interact compose: a target option's server
+--- handler receives a validated context and calls this with the connection it
+--- was given.
+exports('begin', function(source, workflowKey)
+    return Nxc.plain(Service.begin(source, workflowKey))
 end)
 
 exports('setItemProvider', function(fn) Service.setProvider('items', fn) end)
