@@ -2,6 +2,30 @@
 
 Entries are added only for genuinely user-visible or contract-relevant changes.
 
+## 0.1.1 - 2026-08-03
+
+### Added
+
+- `begin(source, workflowKey)` on the server, so a resource can start a workflow
+  for a player.
+
+  **nxc_interact could only be started by the client**, and a nxc_target option
+  handler runs on the server with a validated context and no client to ask - so
+  the two resources did not compose at all. The handler that had just been told a
+  player may pick a lock had no way to make them stand there and do it.
+
+  Both entry points share one implementation. Two copies of the checks drift, and
+  one path quietly becomes the weak one.
+
+  A resource starting a workflow does **not** bypass the capability check. A
+  resource asking on a player's behalf is not the same as the player being
+  entitled.
+
+### Changed
+
+- Refusals are structured error codes rather than bare words, matching every
+  other refusal in the framework.
+
 ## Unreleased
 
 Initial implementation of the interaction workflow service.

@@ -24,7 +24,7 @@ nxc_legacy_compatibility 'none'
 
 author 'The Nexus Core Framework team'
 description 'Reusable interaction workflow orchestration: animations, props, progress, skill checks, cancellation, cleanup.'
-version '0.1.0'
+version '0.1.1'
 
 shared_scripts {
     '@nxc_lib/shared/namespace.lua',
