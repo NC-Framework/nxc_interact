@@ -336,5 +336,16 @@ RegisterCommand('nxc_interact_status', function(source)
     end
 end, true)
 
+Nxc.Service.start({
+    dependencies = { 'nxc_lib', 'nxc_target', 'nxc_ui' },
+    contractVersion = NxcInteract.CONTRACT_VERSION,
+    capabilities = { 'workflows' },
+    ready = true,
+})
+
+--- This resource's own health, for nxc_core's aggregate and for anyone asking
+--- directly. Plain, because a report behind a metatable arrives empty.
+exports('health', function() return Nxc.plain(Nxc.Health.report()) end)
+
 NxcInteract.Service = Service
 return Service
